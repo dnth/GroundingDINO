@@ -13,9 +13,19 @@ from groundingdino.util.misc import clean_state_dict
 from groundingdino.util.slconfig import SLConfig
 from groundingdino.util.utils import get_phrases_from_posmap
 
+import torchvision.transforms as TV
+
 # ----------------------------------------------------------------------------------------------------------------------
 # OLD API
 # ----------------------------------------------------------------------------------------------------------------------
+
+batch_transform = T.Compose(
+    [
+        T.RandomResize([800], max_size=1333),
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ]
+)
 
 
 def preprocess_caption(caption: str) -> str:
@@ -25,7 +35,9 @@ def preprocess_caption(caption: str) -> str:
     return result + "."
 
 
-def load_model(model_config_path: str, model_checkpoint_path: str, device: str = "cuda"):
+def load_model(
+    model_config_path: str, model_checkpoint_path: str, device: str = "cuda"
+):
     args = SLConfig.fromfile(model_config_path)
     args.device = device
     model = build_model(args)
@@ -34,12 +46,12 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
     model.eval()
     return model
 
-
-def load_image_batch(image_path: str, max_width: int, max_height: int) -> Tuple[np.array, torch.Tensor]:
+def load_image_batch(
+    image_path: str, max_width: int, max_height: int
+) -> Tuple[np.array, torch.Tensor]:
     # Resize the image while maintaining aspect ratio
-    import torchvision.transforms as TV
-
     resize_transform = TV.Resize((max_height, max_width))
+
     image_source = Image.open(image_path).convert("RGB")
     image_resized = resize_transform(image_source)
 
@@ -50,20 +62,14 @@ def load_image_batch(image_path: str, max_width: int, max_height: int) -> Tuple[
     padding_bottom = max_height - image_resized.height - padding_top
 
     # Pad the resized image
-    pad_transform = TV.Pad((padding_left, padding_top, padding_right, padding_bottom), fill=0, padding_mode='constant')
+    pad_transform = TV.Pad(
+        (padding_left, padding_top, padding_right, padding_bottom),
+        fill=0,
+        padding_mode="constant",
+    )
     image_padded = pad_transform(image_resized)
 
-    # Convert to tensor and normalize
-
-    transform = T.Compose(
-        [
-            T.RandomResize([800], max_size=1333),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
-
-    image_transformed, _ = transform(image_padded, None)
+    image_transformed, _ = batch_transform(image_padded, None)
 
     return np.asarray(image_padded), image_transformed
 
@@ -83,12 +89,12 @@ def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
 
 
 def predict(
-        model,
-        image: torch.Tensor,
-        caption: str,
-        box_threshold: float,
-        text_threshold: float,
-        device: str = "cuda"
+    model,
+    image: torch.Tensor,
+    caption: str,
+    box_threshold: float,
+    text_threshold: float,
+    device: str = "cuda",
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
     caption = preprocess_caption(caption=caption)
 
@@ -98,8 +104,12 @@ def predict(
     with torch.no_grad():
         outputs = model(image[None], captions=[caption])
 
-    prediction_logits = outputs["pred_logits"].cpu().sigmoid()[0]  # prediction_logits.shape = (nq, 256)
-    prediction_boxes = outputs["pred_boxes"].cpu()[0]  # prediction_boxes.shape = (nq, 4)
+    prediction_logits = (
+        outputs["pred_logits"].cpu().sigmoid()[0]
+    )  # prediction_logits.shape = (nq, 256)
+    prediction_boxes = outputs["pred_boxes"].cpu()[
+        0
+    ]  # prediction_boxes.shape = (nq, 4)
 
     mask = prediction_logits.max(dim=1)[0] > box_threshold
     logits = prediction_logits[mask]  # logits.shape = (n, 256)
@@ -109,26 +119,28 @@ def predict(
     tokenized = tokenizer(caption)
 
     phrases = [
-        get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
-        for logit
-        in logits
+        get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace(
+            ".", ""
+        )
+        for logit in logits
     ]
 
     return boxes, logits.max(dim=1)[0], phrases
 
+
 def predict_batch(
-        model,
-        images_list,
-        captions_list,
-        box_threshold: float,
-        text_threshold: float,
-        device: str = "cuda"
+    model,
+    images_list,
+    captions_list,
+    box_threshold: float,
+    text_threshold: float,
+    device: str = "cuda",
 ):
     captions = [preprocess_caption(caption) for caption in captions_list]
 
     max_width, max_height = 0, 0
     image_tensors = []
-    
+
     # Determine the maximum width and height
     for filename in images_list:
         with Image.open(filename) as img:
@@ -149,14 +161,20 @@ def predict_batch(
     with torch.no_grad():
         outputs = model(images, captions=captions)
 
-    prediction_logits = outputs["pred_logits"].cpu().sigmoid()  # prediction_logits.shape = (bsz，nq, 256)
-    prediction_boxes = outputs["pred_boxes"].cpu()  # prediction_boxes.shape = (bsz, nq, 4)
+    prediction_logits = (
+        outputs["pred_logits"].cpu().sigmoid()
+    )  # prediction_logits.shape = (bsz，nq, 256)
+    prediction_boxes = outputs[
+        "pred_boxes"
+    ].cpu()  # prediction_boxes.shape = (bsz, nq, 4)
 
     logits_res = []
     boxs_res = []
     phrases_list = []
     tokenizer = model.tokenizer
-    for ub_logits, ub_boxes, ub_captions in zip(prediction_logits, prediction_boxes, captions):
+    for ub_logits, ub_boxes, ub_captions in zip(
+        prediction_logits, prediction_boxes, captions
+    ):
         mask = ub_logits.max(dim=1)[0] > box_threshold
         logits = ub_logits[mask]  # logits.shape = (n, 256)
         boxes = ub_boxes[mask]  # boxes.shape = (n, 4)
@@ -165,9 +183,10 @@ def predict_batch(
 
         tokenized = tokenizer(ub_captions)
         phrases = [
-            get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
-            for logit
-            in logits
+            get_phrases_from_posmap(
+                logit > text_threshold, tokenized, tokenizer
+            ).replace(".", "")
+            for logit in logits
         ]
         phrases_list.append(phrases)
 
@@ -177,21 +196,24 @@ def predict_batch(
     return boxs_res, logits_res, phrases_list
 
 
-def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
+def annotate(
+    image_source: np.ndarray,
+    boxes: torch.Tensor,
+    logits: torch.Tensor,
+    phrases: List[str],
+) -> np.ndarray:
     h, w, _ = image_source.shape
     boxes = boxes * torch.Tensor([w, h, w, h])
     xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
     detections = sv.Detections(xyxy=xyxy)
 
-    labels = [
-        f"{phrase} {logit:.2f}"
-        for phrase, logit
-        in zip(phrases, logits)
-    ]
+    labels = [f"{phrase} {logit:.2f}" for phrase, logit in zip(phrases, logits)]
 
     box_annotator = sv.BoxAnnotator()
     annotated_frame = cv2.cvtColor(image_source, cv2.COLOR_RGB2BGR)
-    annotated_frame = box_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+    annotated_frame = box_annotator.annotate(
+        scene=annotated_frame, detections=detections, labels=labels
+    )
     return annotated_frame
 
 
@@ -201,17 +223,13 @@ def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor
 
 
 class Model:
-
     def __init__(
-        self,
-        model_config_path: str,
-        model_checkpoint_path: str,
-        device: str = "cuda"
+        self, model_config_path: str, model_checkpoint_path: str, device: str = "cuda"
     ):
         self.model = load_model(
             model_config_path=model_config_path,
             model_checkpoint_path=model_checkpoint_path,
-            device=device
+            device=device,
         ).to(device)
         self.device = device
 
@@ -220,7 +238,7 @@ class Model:
         image: np.ndarray,
         caption: str,
         box_threshold: float = 0.35,
-        text_threshold: float = 0.25
+        text_threshold: float = 0.25,
     ) -> Tuple[sv.Detections, List[str]]:
         """
         import cv2
@@ -246,14 +264,13 @@ class Model:
             image=processed_image,
             caption=caption,
             box_threshold=box_threshold,
-            text_threshold=text_threshold, 
-            device=self.device)
+            text_threshold=text_threshold,
+            device=self.device,
+        )
         source_h, source_w, _ = image.shape
         detections = Model.post_process_result(
-            source_h=source_h,
-            source_w=source_w,
-            boxes=boxes,
-            logits=logits)
+            source_h=source_h, source_w=source_w, boxes=boxes, logits=logits
+        )
         return detections, phrases
 
     def predict_with_classes(
@@ -261,7 +278,7 @@ class Model:
         image: np.ndarray,
         classes: List[str],
         box_threshold: float,
-        text_threshold: float
+        text_threshold: float,
     ) -> sv.Detections:
         """
         import cv2
@@ -290,13 +307,12 @@ class Model:
             caption=caption,
             box_threshold=box_threshold,
             text_threshold=text_threshold,
-            device=self.device)
+            device=self.device,
+        )
         source_h, source_w, _ = image.shape
         detections = Model.post_process_result(
-            source_h=source_h,
-            source_w=source_w,
-            boxes=boxes,
-            logits=logits)
+            source_h=source_h, source_w=source_w, boxes=boxes, logits=logits
+        )
         class_id = Model.phrases2classes(phrases=phrases, classes=classes)
         detections.class_id = class_id
         return detections
@@ -316,10 +332,7 @@ class Model:
 
     @staticmethod
     def post_process_result(
-            source_h: int,
-            source_w: int,
-            boxes: torch.Tensor,
-            logits: torch.Tensor
+        source_h: int, source_w: int, boxes: torch.Tensor, logits: torch.Tensor
     ) -> sv.Detections:
         boxes = boxes * torch.Tensor([source_w, source_h, source_w, source_h])
         xyxy = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
