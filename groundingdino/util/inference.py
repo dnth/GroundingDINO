@@ -6,7 +6,6 @@ import supervision as sv
 import torch
 from PIL import Image
 from torchvision.ops import box_convert
-import bisect
 
 import groundingdino.datasets.transforms as T
 from groundingdino.models import build_model
@@ -36,6 +35,39 @@ def load_model(model_config_path: str, model_checkpoint_path: str, device: str =
     return model
 
 
+def load_image_batch(image_path: str, max_width: int, max_height: int) -> Tuple[np.array, torch.Tensor]:
+    # Resize the image while maintaining aspect ratio
+    import torchvision.transforms as TV
+
+    resize_transform = TV.Resize((max_height, max_width))
+    image_source = Image.open(image_path).convert("RGB")
+    image_resized = resize_transform(image_source)
+
+    # Calculate padding needed to reach the common size
+    padding_left = (max_width - image_resized.width) // 2
+    padding_top = (max_height - image_resized.height) // 2
+    padding_right = max_width - image_resized.width - padding_left
+    padding_bottom = max_height - image_resized.height - padding_top
+
+    # Pad the resized image
+    pad_transform = TV.Pad((padding_left, padding_top, padding_right, padding_bottom), fill=0, padding_mode='constant')
+    image_padded = pad_transform(image_resized)
+
+    # Convert to tensor and normalize
+
+    transform = T.Compose(
+        [
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )
+
+    image_transformed, _ = transform(image_padded, None)
+
+    return np.asarray(image_padded), image_transformed
+
+
 def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
     transform = T.Compose(
         [
@@ -56,8 +88,7 @@ def predict(
         caption: str,
         box_threshold: float,
         text_threshold: float,
-        device: str = "cuda",
-        remove_combined: bool = False
+        device: str = "cuda"
 ) -> Tuple[torch.Tensor, torch.Tensor, List[str]]:
     caption = preprocess_caption(caption=caption)
 
@@ -76,25 +107,74 @@ def predict(
 
     tokenizer = model.tokenizer
     tokenized = tokenizer(caption)
+
+    phrases = [
+        get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
+        for logit
+        in logits
+    ]
+
+    return boxes, logits.max(dim=1)[0], phrases
+
+def predict_batch(
+        model,
+        images_list,
+        captions_list,
+        box_threshold: float,
+        text_threshold: float,
+        device: str = "cuda"
+):
+    captions = [preprocess_caption(caption) for caption in captions_list]
+
+    max_width, max_height = 0, 0
+    image_tensors = []
     
-    if remove_combined:
-        sep_idx = [i for i in range(len(tokenized['input_ids'])) if tokenized['input_ids'][i] in [101, 102, 1012]]
-        
-        phrases = []
-        for logit in logits:
-            max_idx = logit.argmax()
-            insert_idx = bisect.bisect_left(sep_idx, max_idx)
-            right_idx = sep_idx[insert_idx]
-            left_idx = sep_idx[insert_idx - 1]
-            phrases.append(get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer, left_idx, right_idx).replace('.', ''))
-    else:
+    # Determine the maximum width and height
+    for filename in images_list:
+        with Image.open(filename) as img:
+            if img.size[0] > max_width:
+                max_width = img.size[0]
+            if img.size[1] > max_height:
+                max_height = img.size[1]
+
+    # Process each image
+    for filename in images_list:
+        _, image_tensor = load_image_batch(filename, max_width, max_height)
+        image_tensors.append(image_tensor)
+
+    images = torch.stack(image_tensors)
+    images = images.to(device)
+    model = model.to(device)
+
+    with torch.no_grad():
+        outputs = model(images, captions=captions)
+
+    prediction_logits = outputs["pred_logits"].cpu().sigmoid()  # prediction_logits.shape = (bsz，nq, 256)
+    prediction_boxes = outputs["pred_boxes"].cpu()  # prediction_boxes.shape = (bsz, nq, 4)
+
+    logits_res = []
+    boxs_res = []
+    phrases_list = []
+    tokenizer = model.tokenizer
+    for ub_logits, ub_boxes, ub_captions in zip(prediction_logits, prediction_boxes, captions):
+        mask = ub_logits.max(dim=1)[0] > box_threshold
+        logits = ub_logits[mask]  # logits.shape = (n, 256)
+        boxes = ub_boxes[mask]  # boxes.shape = (n, 4)
+        logits_res.append(logits.max(dim=1)[0])
+        boxs_res.append(boxes)
+
+        tokenized = tokenizer(ub_captions)
         phrases = [
             get_phrases_from_posmap(logit > text_threshold, tokenized, tokenizer).replace('.', '')
             for logit
             in logits
         ]
+        phrases_list.append(phrases)
 
-    return boxes, logits.max(dim=1)[0], phrases
+    # print('bboxs:', boxs_res)
+    # print('logits:', logits_res)
+    # print('phrases:', phrases_list)
+    return boxs_res, logits_res, phrases_list
 
 
 def annotate(image_source: np.ndarray, boxes: torch.Tensor, logits: torch.Tensor, phrases: List[str]) -> np.ndarray:
@@ -250,10 +330,8 @@ class Model:
     def phrases2classes(phrases: List[str], classes: List[str]) -> np.ndarray:
         class_ids = []
         for phrase in phrases:
-            for class_ in classes:
-                if class_ in phrase:
-                    class_ids.append(classes.index(class_))
-                    break
-            else:
+            try:
+                class_ids.append(classes.index(phrase))
+            except ValueError:
                 class_ids.append(None)
         return np.array(class_ids)
