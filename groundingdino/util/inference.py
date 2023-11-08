@@ -73,6 +73,48 @@ def load_image_batch(
 
     return np.asarray(image_padded), image_transformed
 
+def preprocess_batch_image(filelist: list) -> torch.Tensor:
+
+    max_width, max_height = 0, 0
+    image_tensors = []
+
+    # Determine the maximum width and height
+    for filename in filelist:
+        with Image.open(filename) as img:
+            if img.size[0] > max_width:
+                max_width = img.size[0]
+            if img.size[1] > max_height:
+                max_height = img.size[1]
+
+    # Resize the image while maintaining aspect ratio
+    resize_transform = TV.Resize((max_height, max_width))
+
+    # Process each image
+    for filename in filelist:
+        image_source = Image.open(filename).convert("RGB")
+        image_resized = resize_transform(image_source)
+
+        # Calculate padding needed to reach the common size
+        padding_left = (max_width - image_resized.width) // 2
+        padding_top = (max_height - image_resized.height) // 2
+        padding_right = max_width - image_resized.width - padding_left
+        padding_bottom = max_height - image_resized.height - padding_top
+
+        # Pad the resized image
+        pad_transform = TV.Pad(
+            (padding_left, padding_top, padding_right, padding_bottom),
+            fill=0,
+            padding_mode="constant",
+        )
+        image_padded = pad_transform(image_resized)
+
+        image_transformed, _ = batch_transform(image_padded, None)
+
+        image_tensors.append(image_transformed)
+
+    batch_image_tensor = torch.stack(image_tensors)
+
+    return batch_image_tensor
 
 def load_image(image_path: str) -> Tuple[np.array, torch.Tensor]:
     transform = T.Compose(
@@ -137,29 +179,12 @@ def predict_batch(
     device: str = "cuda",
 ):
     captions = [preprocess_caption(caption) for caption in captions_list]
+    batch_image_tensor = preprocess_batch_image(images_list)
 
-    max_width, max_height = 0, 0
-    image_tensors = []
-
-    # Determine the maximum width and height
-    for filename in images_list:
-        with Image.open(filename) as img:
-            if img.size[0] > max_width:
-                max_width = img.size[0]
-            if img.size[1] > max_height:
-                max_height = img.size[1]
-
-    # Process each image
-    for filename in images_list:
-        _, image_tensor = load_image_batch(filename, max_width, max_height)
-        image_tensors.append(image_tensor)
-
-    images = torch.stack(image_tensors)
-    images = images.to(device)
-    model = model.to(device)
+    batch_image_tensor = batch_image_tensor.to(device)
 
     with torch.no_grad():
-        outputs = model(images, captions=captions)
+        outputs = model(batch_image_tensor, captions=captions)
 
     prediction_logits = (
         outputs["pred_logits"].cpu().sigmoid()
