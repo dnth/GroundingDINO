@@ -20,6 +20,7 @@ PyTorch implementation and pretrained models for Grounding DINO. For details, se
 
 ## :sun_with_face: Helpful Tutorial
 
+- 👋 Batch inference notebook by dnth - https://colab.research.google.com/drive/1hlMxVSQ_8tV8n3REhYt9wYGR2draQL5y?usp=sharing
 - :grapes: [[Read our arXiv Paper](https://arxiv.org/abs/2303.05499)]
 - :apple:  [[Watch our simple introduction video on YouTube](https://youtu.be/wxWDt5UiwY8)]
 - :blossom:   &nbsp;[[Try the Colab Demo](https://colab.research.google.com/github/roboflow-ai/notebooks/blob/main/notebooks/zero-shot-object-detection-with-grounding-dino.ipynb)]
